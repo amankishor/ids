@@ -1,29 +1,45 @@
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const http = require('node:http');
 (async()=>{
+ const server=http.createServer((req,res)=>{const file=path.resolve('.'+decodeURIComponent(req.url==='/'?'/index.html':req.url.split('?')[0]));if(!file.startsWith(process.cwd()+path.sep)){res.writeHead(403);res.end();return;}fs.readFile(file,(err,data)=>{if(err){res.writeHead(404);res.end();return;}const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.png':'image/png'};res.setHeader('Content-Type',types[path.extname(file)]||'application/octet-stream');res.end(data);});});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const browser=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
  const page=await browser.newPage({viewport:{width:1440,height:1000}});
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto('file:///'+path.resolve('index.html').replaceAll('\\','/'));
- assert.equal(await page.locator('.template').count(),4);
- for(let i=0;i<4;i++){
+ await page.goto(`http://127.0.0.1:${server.address().port}`);
+ await page.waitForFunction(()=>document.body.dataset.ready==='true');
+ await page.evaluate(()=>document.fonts.ready);
+ assert.equal(await page.locator('.template').count(),5);
+ for(let i=0;i<5;i++){
   await page.locator('.template').nth(i).click();
   const original=await page.locator('#front').evaluate(c=>c.toDataURL());
   const download=page.waitForEvent('download');await page.locator('#download').click();
-  assert.match((await download).suggestedFilename(),/original\.png$/);
+  assert.match((await download).suggestedFilename(),i<3?/_cards\.zip$/:/original\.png$/);
   await page.locator('#custom-mode').click();
+  if(i===0){assert.equal(await page.locator('#person-name').inputValue(),'');assert.equal(await page.locator('#qr-link-row').isVisible(),false);}
   await page.locator('#person-name').fill('Aman Kishor');
   await page.locator('#download').click();assert.match(await page.locator('#status').innerText(),/Add your photo/);
-  const png=await page.locator('#hero-card').evaluate(c=>c.toDataURL().split(',')[1]);
+  const png=await page.locator('#front').evaluate(c=>c.toDataURL().split(',')[1]);
   await page.locator('#photo').setInputFiles({name:'portrait.png',mimeType:'image/png',buffer:Buffer.from(png,'base64')});
   await page.waitForFunction(()=>document.getElementById('status').textContent.includes('Photo added'));
+  const beforeQr=await page.locator('#rear').evaluate(c=>c.toDataURL());
+  await page.locator('#qr-enabled').check();
   await page.locator('#qr-url').fill('https://example.com/aman');
+  if(i===0)assert.notEqual(await page.locator('#rear').evaluate(c=>c.toDataURL()),beforeQr);
   assert.notEqual(await page.locator('#front').evaluate(c=>c.toDataURL()),original);
   const customDownload=page.waitForEvent('download');await page.locator('#download').click();
-  assert.match((await customDownload).suggestedFilename(),/custom\.png$/);
-  await page.locator('#default-mode').click();
-  assert.equal(await page.locator('#front').evaluate(c=>c.toDataURL()),original);
+  const customFile=await customDownload;
+  assert.match(customFile.suggestedFilename(),/custom\.png$/);
+  const pngBytes=fs.readFileSync(await customFile.path());
+  const dimensions=await page.locator('#front').evaluate(c=>({width:c.width,height:c.height}));
+  assert.equal(pngBytes.readUInt32BE(16),dimensions.width*2+80);
+  assert.equal(pngBytes.readUInt32BE(20),dimensions.height+80);
+  await page.locator('#qr-enabled').uncheck();
+  await page.locator('#return-default').click();
+  assert.ok((await page.locator('#front').evaluate(c=>c.toDataURL()))===original,'Reset mismatch template '+i);
   await page.locator('#back').click();
  }
  await page.screenshot({path:'test-results/desktop.png',fullPage:true});
@@ -33,6 +49,7 @@ const path = require('node:path');
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  await page.screenshot({path:'test-results/mobile.png',fullPage:true});
  assert.deepEqual(errors,[]);
- console.log('PASS: all four original/custom exports, photo uploads, QR rendering, reset consistency, and mobile overflow.');
+ console.log('PASS: all five original/custom exports, blank Oscorp custom fields, QR toggle/link, photo uploads, reset consistency, and mobile overflow.');
  await browser.close();
+ server.closeAllConnections();server.close();
 })().catch(e=>{console.error(e);process.exit(1)});
